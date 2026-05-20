@@ -1,0 +1,151 @@
+import mysql.connector
+import sys
+
+# --- CONFIGURATION ---
+DB_CONFIG = {
+    'host': '127.0.0.1',
+    'user': 'root',
+    'password': 'DB_PASSWORD',
+    'database': 'swf',
+    'allow_local_infile': True, 
+    'auth_plugin': 'caching_sha2_password'
+}
+
+CSV_PATH = 'C:/FILE_PATH_HERE/stats.csv'
+
+def run_pipeline():
+    conn = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        print("🚀 Pipeline Started...")
+
+        # 1. TRUNCATE & LOAD STAGING
+        print("📥 Loading CSV to Staging...")
+        cursor.execute("TRUNCATE TABLE match_stats_staging")
+        
+        # Note: Use forward slashes for Windows paths in SQL strings
+        load_sql = f"""
+        LOAD DATA LOCAL INFILE '{CSV_PATH}' 
+        INTO TABLE match_stats_staging 
+        FIELDS TERMINATED BY ',' 
+        ENCLOSED BY '"' 
+        LINES TERMINATED BY '\\n'
+        IGNORE 1 LINES;
+        """
+        cursor.execute(load_sql)
+
+        # 2. CHECKPOINT 1: Missing Match IDs
+        print("🔍 Running Checkpoint 1 (Match ID Validation)...")
+        cursor.execute("""
+            SELECT DISTINCT s.match_id 
+            FROM match_stats_staging s 
+            LEFT JOIN matches m ON s.match_id = m.match_id 
+            WHERE m.match_id IS NULL
+        """)
+        missing_ids = cursor.fetchall()
+        if missing_ids:
+            print(f"❌ ERROR: Match IDs in CSV do not exist in 'matches' table: {[r['match_id'] for r in missing_ids]}")
+            sys.exit(1)
+
+        # 3. CHECKPOINT 2: Match Status Validation
+        print("🔍 Running Checkpoint 2 (Match Status Validation)...")
+        cursor.execute("""
+            SELECT DISTINCT s.match_id, m.match_status 
+            FROM match_stats_staging s 
+            JOIN matches m ON s.match_id = m.match_id 
+            WHERE m.match_status <> 'played'
+        """)
+        invalid_status = cursor.fetchall()
+        if invalid_status:
+            print(f"❌ ERROR: Matches found in CSV that are not marked as 'played': {[r['match_id'] for r in invalid_status]}")
+            sys.exit(1)
+
+        # 4. TRANSFER DATA TO PRODUCTION
+        print("📤 Transferring data to match_stats...")
+        cursor.execute("""
+            INSERT INTO match_stats (
+                match_id, team_id, result,
+                pen_won, pen_conceded, pen_scored, pen_missed,
+                possession_pct,
+                firsthalf_goals, secondhalf_goals,
+                fouls_commit, yellow_cards, red_cards,
+                firsthalf_shots, firsthalf_corners, firsthalf_SOT,
+                secondhalf_shots, secondhalf_corners, secondhalf_SOT
+            )
+            SELECT
+                s.match_id, s.team_id, s.result,
+                s.pen_won, s.pen_conceded, s.pen_scored, s.pen_missed,
+                s.possession_pct,
+                s.firsthalf_goals, s.secondhalf_goals,
+                s.fouls_commit, s.yellow_cards, s.red_cards,
+                s.firsthalf_shots, s.firsthalf_corners, s.firsthalf_SOT,
+                s.secondhalf_shots, s.secondhalf_corners, s.secondhalf_SOT
+            FROM match_stats_staging s
+            JOIN matches m ON s.match_id = m.match_id
+            WHERE m.match_status = 'played'
+        """)
+
+        # 5. REFRESH TEAM STRESS INDEX
+        print("🔄 Refreshing Team Stress Index (Materializing View)...")
+        cursor.execute("TRUNCATE TABLE team_stress_index")
+        stress_sql = """
+        INSERT INTO team_stress_index
+        WITH TeamPressureHistory AS (
+            SELECT 
+                ms.team_id,
+                ms.result,
+                CASE 
+                    WHEN (CASE WHEN ms.team_id = pp.home_team_id THEN pp.APressure_vs_HDef ELSE pp.HPressure_vs_ADef END) < (lb.AVG_MatchPressure * 0.80) THEN 'Zone 1: Low'
+                    WHEN (CASE WHEN ms.team_id = pp.home_team_id THEN pp.APressure_vs_HDef ELSE pp.HPressure_vs_ADef END) BETWEEN (lb.AVG_MatchPressure * 0.80) AND (lb.AVG_MatchPressure * 1.15) THEN 'Zone 2: Neutral'
+                    WHEN (CASE WHEN ms.team_id = pp.home_team_id THEN pp.APressure_vs_HDef ELSE pp.HPressure_vs_ADef END) BETWEEN (lb.AVG_MatchPressure * 1.15) AND (lb.AVG_MatchPressure * 1.45) THEN 'Zone 3: High'
+                    WHEN (CASE WHEN ms.team_id = pp.home_team_id THEN pp.APressure_vs_HDef ELSE pp.HPressure_vs_ADef END) > (lb.AVG_MatchPressure * 1.45) THEN 'Zone 4: REDLINE'
+                    ELSE 'Zone 0: Unknown'
+                END AS stress_zone
+            FROM match_stats ms
+            JOIN v2_match_pressure_profile pp ON ms.match_id = pp.match_id
+            JOIN matches m ON ms.match_id = m.match_id
+            JOIN v_league_baselines lb ON m.competition_id = lb.Comp AND m.season = lb.season
+            WHERE m.segment IS NULL
+        )
+        SELECT 
+            team_id,
+            stress_zone,
+            COUNT(*),
+            ROUND(SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) / COUNT(*) * 100, 2),
+            ROUND(SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) / COUNT(*) * 100, 2),
+            ROUND(SUM(CASE WHEN result = 'draw' THEN 1 ELSE 0 END) / COUNT(*) * 100, 2)
+        FROM TeamPressureHistory
+        GROUP BY team_id, stress_zone;
+        """
+        cursor.execute(stress_sql)
+
+        # 6. REFRESH AUDIT REPORT SNAPSHOT FROM v4_matchday_audit_report
+        print(f"Cleaning Snapshot Table..")
+        cursor.execute("TRUNCATE TABLE t_audit_snapshot")
+        print(f"🛠️ Creating New Audit Report Snapshot (this may take a while...)")
+
+        audit_query="""
+        INSERT INTO t_audit_snapshot
+        SELECT 
+        s.*,
+        m.match_date
+        FROM v4_matchday_audit_report s
+        JOIN matches m ON s.match_id = m.match_id WHERE m.match_status = 'scheduled'
+        """
+        cursor.execute(audit_query)
+
+        conn.commit()
+        print("✅ Pipeline Success! Database Refreshed. Weekly Audit Snapshot Now Available! 📊")
+
+    except Exception as e:
+        print(f"🧨 PIPELINE FAILED: {str(e)}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+if __name__ == "__main__":
+    run_pipeline()
