@@ -1,0 +1,173 @@
+import requests
+import mysql.connector
+import time
+from pprint import pprint
+
+API_KEY = "MY_API_KEY"
+
+competitions = [
+'soccer_spain_la_liga',
+'soccer_brazil_campeonato',
+'soccer_argentina_primera_division',
+'soccer_epl',
+'soccer_germany_bundesliga',
+'soccer_italy_serie_a',
+'soccer_mexico_ligamx',
+'soccer_usa_mls'
+]
+
+def get_db_connection():
+    return mysql.connector.connect(
+        host='127.0.0.1',
+        user='root',
+        password='DB_PASSWORD',
+        database='swf',
+        auth_plugin='caching_sha2_password'
+    )
+def fetch_odds(league):
+    endpoint = f"https://api.the-odds-api.com/v4/sports/{league}/odds/"
+    params = {
+        'regions':'us',
+        'markets':'h2h,totals', #keep it tight because each market costs
+        'oddsFormat': 'american',
+        'apiKey': API_KEY
+    }
+
+    res = requests.get(endpoint, params=params).json()
+
+    matches = []
+
+    for match in res:
+        match['bookmakers'] = [
+            b for b in match['bookmakers'] if b['key'] == 'betmgm'
+        ]
+        if match['bookmakers']:
+            matches.append(match)
+    return matches
+def normalize_odds(raw_matches, league):
+    rows =[]
+
+    for match in raw_matches:
+        home = match['home_team']
+        away = match['away_team']
+        kickoff = match['commence_time'].replace('T', ' ').replace('Z', '')
+
+        for book in match['bookmakers']:
+            if book['key'] != 'betmgm':
+                continue
+            for market in book['markets']:
+                market_key = market['key']
+                snapshot_time = market['last_update'].replace('T', ' ').replace('Z', '')
+
+                for outcome in market['outcomes']:
+                    rows.append({
+                        'league': league,
+                        'bookmaker': book['key'],
+                        'home_team': home,
+                        'away_team': away,
+                        'kickoff': kickoff,
+                        'market': market_key,
+                        'selection': outcome['name'],
+                        'price': outcome['price'],
+                        'point': outcome.get('point'),
+                        'snapshot_time': snapshot_time
+                    })
+    return rows
+def insert_scraped_odds(conn, rows):
+    cursor = conn.cursor()
+
+    sql = """
+    INSERT INTO scraped_odds (
+        league, home_team, away_team, market, selection, point,
+        price, kickoff, snapshot_time, source
+    )
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    ON DUPLICATE KEY UPDATE 
+        price = VALUES(price),
+        snapshot_time = VALUES(snapshot_time),
+        kickoff = VALUES(kickoff);
+    """
+
+    data = [
+        (r['league'], r['home_team'], r['away_team'], r['market'], 
+         r['selection'], r['point'], r['price'], r['kickoff'], 
+         r['snapshot_time'], 'betmgm')
+        for r in rows
+    ]
+
+    cursor.executemany(sql, data)
+    conn.commit()
+    cursor.close()
+def process_scraped_odds(conn):
+    cursor = conn.cursor()
+    try:
+        print(f"Refreshing existing processed odds ♻️... STEP ZERO: truncating table.")
+        cursor.execute('TRUNCATE TABLE processed_odds')
+        print(f"Step 1: Mapping raw data and calculating implied probabilites.")
+        process_step1 = """
+        INSERT INTO processed_odds (match_id,market,selection,price,point,implied_prob, snapshot_time)
+        SELECT 
+            m.match_id,
+            o.market,
+            o.selection,
+            o.price,
+            o.point,
+            -- formula for implied probability from american odds conversion
+            CASE 
+                WHEN o.price < 0 THEN (ABS(o.price) / (ABS(o.price) + 100))
+                ELSE (100 / (o.price + 100))
+            END as implied_prob,
+            o.snapshot_time
+
+        FROM scraped_odds o
+        JOIN team_name_mapper m1 ON o.home_team = m1.api_name
+        JOIN team_name_mapper m2 ON o.away_team = m2.api_name
+        JOIN matches m ON m.home_team_id = m1.db_team_id AND m.away_team_id = m2.db_team_id AND m.match_date = DATE(o.kickoff - INTERVAL 5 HOUR) 
+        WHERE o.id IN (SELECT MAX(id) FROM scraped_odds GROUP BY home_team,away_team,market,selection,point,source); 
+        """
+        cursor.execute(process_step1)
+
+        print(f"Step 2: Mapping done and implied probabilites established. Removing house's vig and calculating fair probabilites.")
+        process_step2 = """
+        UPDATE processed_odds po
+        JOIN (
+          SELECT match_id, market, snapshot_time, SUM(implied_prob) as total_prob
+          FROM processed_odds
+          GROUP BY match_id, market, snapshot_time
+      ) as sums ON po.match_id = sums.match_id AND po.market = sums.market AND po.snapshot_time = sums.snapshot_time
+        SET po.house_edge = sums.total_prob - 1,
+        po.fair_prob = po.implied_prob / sums.total_prob;
+        """
+        cursor.execute(process_step2)
+        conn.commit()
+        print(f"Processing complete.♻ ✅")
+    except Exception as e:
+        print(f'❌ Processing FAILED: {str(e)}')
+    finally:
+        cursor.close()
+
+
+conn = get_db_connection()
+print(f"Starting scrape for league odds...")
+for competition in competitions:
+    try:
+        print(f'Scraping: {competition}...', end = '', flush=True)
+
+        raw = fetch_odds(competition)
+        if not raw:
+            print('no matches found.')
+            continue
+        
+        rows = normalize_odds(raw, competition)
+        insert_scraped_odds(conn, rows)
+
+        print(f'Done! ({len(rows)} rows inserted into database)')
+
+        time.sleep(1)
+
+    except Exception as e:
+        print(f'FAILED: {str(e)}')
+        continue
+process_scraped_odds(conn)
+conn.close()
+print('Odds have been successfully scraped and processed.')
