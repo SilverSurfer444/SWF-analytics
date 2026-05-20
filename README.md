@@ -144,8 +144,11 @@ A positive SWF Score in either market means the statistical case is stronger tha
 The Streamlit app has two panels:
 
 **Matchday Audit Dashboard** — date-selectable match grid showing all tracked leagues for that day. Color-coded metrics: green for strong signals, red for weak or leaking. Toggle for simplified vs. advanced physics view. Row-click opens a deep dive popover with forensic match profile. Zone specialist highlighting triggers when a team has ≥70% win rate in their current stress zone with ≥8 qualifying matches.
+![Matchday Audit Dashboard](assets/dashboard_snapshot2.png)
 
 **Market Price Evaluator** — filters to H2H or Totals market. Surfaces only selections where SWF Score > 0 and minimum sample thresholds are met. Color-coded by score tier: green (≥0.12), orange (0.06–0.12), red (<0.06).
+![Matchday Audit Dashboard](assets/dashboard_H2H_snapshot.png)
+![Matchday Audit Dashboard](assets/dashboard_totals_snapshot.png)
 
 The sidebar tracks live bankroll metrics: net value, lifetime ROI, active yield, W/L record, and volume risked.
 
