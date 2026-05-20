@@ -1,6 +1,6 @@
 # SWF Analytics
 
-> A soccer match analytics engine that models attack pressure, conversion efficiency, momentum, and defensive fragility — then compares statistical probability against bookmaker market pricing to surface high-value selections and identify mispriced assets.
+> A soccer match analytics engine that models attack pressure, conversion efficiency, momentum, and defensive fragility — then compares statistical probability against bookmaker market pricing to surface high-value selections via the identification of mispriced assets.
 
 ![Matchday Audit Dashboard](assets/dashboard_snapshot.png)
 
@@ -8,9 +8,10 @@
 
 ## What This Is
 
-SWF is a personal analytics system built from scratch to answer one question: **are bookmaker odds accurately priced relative to what the statistics actually say?**
+SWF is a personal analytics system built from scratch to answer one question: **are bookmaker odds ineffeciently priced relative to what the statistics actually say?**
 
-It is not a betting bot. It is not a prediction system. It is a **market evaluation engine** — it quantifies team performance across multiple dimensions, models expected match outcomes using those metrics, and produces a score (the **SWF Score**) that measures the gap between statistical probability and market-implied probability.
+It is not a betting bot. It is not a prediction system. It is a **market evaluation engine** — it quantifies team performance across multiple dimensions, models expected match outcomes using those metrics, and produces a score (the **SWF Score**) that measures the gap between statistical probability and market-implied probability. Standard sportsbooks price totals and moneylines based heavily on public narrative, rolling box scores, and localized team trends. This system exploits those blind spots through its metric framework.
+
 
 A positive SWF Score means the market is underpricing the statistical case for a given outcome. That's the signal. That's the mispriced asset.
 
