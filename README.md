@@ -170,7 +170,7 @@ This is an active personal research project. The core metric framework and dashb
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/swf-analytics.git
+git clone https://github.com/silversurfer444/swf-analytics.git
 cd swf-analytics
 
 # Install dependencies
