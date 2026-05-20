@@ -164,6 +164,12 @@ This is an active personal research project. The core metric framework and dashb
 
 ---
 
+## Pipelines
+
+/pipelines - contains two automation scripts: a match stats ingestion pipeline with validation checkpoints and rollback logic and a live odds scraping and normalization pipeline that fetches from an external API and processes implied probability and fair value calculations.
+
+---
+
 ## Setup
 
 > This project runs locally against a MySQL instance. No hosted demo is available at this time.
